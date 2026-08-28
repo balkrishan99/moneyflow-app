@@ -9,10 +9,10 @@ two small Vercel serverless functions for storage and AI category suggestions.
   function backed by a real Redis database (via Vercel's Marketplace Redis
   integration, Upstash). This is what makes Groups actually sync between
   different people's browsers/devices.
-- **AI category suggestions**: the app used to call Anthropic directly from
+- **AI category suggestions**: the app used to call an AI provider directly from
   the browser, using credentials the artifact sandbox injected for you. A
-  real deployment can't do that safely — so this now calls `/api/ai-suggest`,
-  a serverless function that holds your own Anthropic API key server-side.
+   real deployment can't do that safely — so this now calls `/api/ai-suggest`,
+   a serverless function that holds your NVIDIA API key server-side.
   This feature is optional; the rest of the app works fine without it.
 
 ## 1. Push this to GitHub
@@ -48,9 +48,11 @@ Without this step, the app loads but nothing you add will persist or sync.
 
 ## 4. (Optional) Enable AI category suggestions
 
-1. Get an API key from [console.anthropic.com](https://console.anthropic.com/).
+1. Get an API key from [build.nvidia.com](https://build.nvidia.com/).
 2. In your Vercel project: **Settings** → **Environment Variables** → add
-   `ANTHROPIC_API_KEY` with that value.
+   `NVIDIA_API_KEY` with that value. Keep it server-side; do not add it to
+   frontend code or variables prefixed with `VITE_`.
+   You can optionally add `NVIDIA_MODEL` to specify the model (defaults to `meta/llama-3.1-8b-instruct`).
 3. Redeploy.
 
 If you skip this, the ✨ "suggest category" button will just show a friendly
@@ -71,9 +73,17 @@ npm i -g vercel
 vercel dev
 ```
 
-Copy `.env.example` to `.env.local` and fill in values for local testing
-(`vercel dev` will also prompt to pull your project's real env vars if you've
-already deployed once).
+Copy `.env.example` to `.env.local` and fill in values for local testing. Put
+your key on this line in the project root file
+`moneyflow-app/.env.local`:
+
+```text
+NVIDIA_API_KEY=your-key-goes-here
+```
+
+Replace only the placeholder locally; never commit `.env.local`. The file is
+already ignored by Git. `vercel dev` will also prompt to pull your project's
+real env vars if you've already deployed once.
 
 ## Before you invite other people
 

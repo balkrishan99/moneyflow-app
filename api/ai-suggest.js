@@ -1,5 +1,6 @@
 // Proxies the "suggest category" feature to Anthropic's API, keeping the
 // API key server-side. The browser only ever talks to this endpoint.
+import { getSession } from "../lib/auth.js";
 
 const TXN_TYPES = ["expense", "income", "transfer", "refund", "debt"];
 
@@ -7,6 +8,10 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  if (!getSession(req)) {
+    return res.status(401).json({ error: "Sign in required." });
   }
 
   const { description, categories } = req.body || {};
