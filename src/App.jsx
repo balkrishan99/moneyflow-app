@@ -993,7 +993,12 @@ function AuthScreen({ onAuthed }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(mode === "signup" ? { email: normEmail, password, name: name.trim() } : { email: normEmail, password }),
       });
-      const data = await res.json();
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = { error: `The server returned an unexpected response (${res.status}).` };
+      }
       if (!res.ok) { setError(data.error || "Something went wrong."); setBusy(false); return; }
       onAuthed(data);
     } catch {
