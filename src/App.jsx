@@ -39,7 +39,8 @@ function useFonts() {
      group_expenses, expense_splits, settlements, notifications,
      audit_log
 
-   Personal data lives under key `mf:user:{name}` (private).
+   Personal data lives under key `mf:user:{accountId}` (private, enforced
+   server-side against the signed-in session — see api/kv.js).
    Each group lives under its own key `mf:group:{id}` (shared),
    since multiple people read/write the same group.
 
@@ -105,9 +106,10 @@ function addInterval(dateStr, freq) {
 /* ============================================================
    STORAGE LAYER
    ============================================================ */
-function emptyUserData(name) {
+function emptyUserData(accountId, displayName) {
   return {
-    name,
+    id: accountId,             // stable identity, used as the storage key — never shown or editable
+    name: displayName,         // editable display name, shown in groups/avatars/UI
     accounts: [{ id: uid(), name: "Cash", type: "Cash", startingBalanceMinor: 0, currency: "INR", active: true }],
     transactions: [],
     budgets: {},               // { category: limitMinor }
@@ -122,9 +124,12 @@ function emptyUserData(name) {
   };
 }
 
-// loadUser / saveUser / loadGroup / saveGroup now come from ./storage.js,
-// which talks to /api/kv (backed by Vercel KV) instead of the artifact's
-// window.storage. See src/storage.js.
+// loadUser / saveUser / loadGroup / saveGroup come from ./storage.js, which
+// talks to /api/kv (backed by MongoDB) instead of the artifact's
+// window.storage. Personal data is now keyed by the account's stable id
+// (mf:user:{accountId}), not by display name, so renaming yourself later
+// doesn't orphan your data. The API enforces that only the signed-in
+// account can read/write its own mf:user:* key — see api/kv.js.
 
 function emptyGroup(id, name, description, currency, members) {
   return { id, name, description: description || "", currency: currency || "INR", members, expenses: [], settlements: [], recurringRules: [] };
@@ -174,8 +179,8 @@ const MOBILE_NAV_KEYS = ["overview", "transactions", "groups", "insights", "sett
 
 export default function App() {
   useFonts();
-  const [user, setUser] = useState(null);
-  const [nameInput, setNameInput] = useState("");
+  const [account, setAccount] = useState(null);       // { accountId, email, name } | null
+  const [authChecking, setAuthChecking] = useState(true);
   const [userData, setUserData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [groupsData, setGroupsData] = useState({});
@@ -191,12 +196,23 @@ export default function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
   }, []);
 
+  /* ---------- restore session on load ---------- */
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setAccount(data); })
+      .catch(() => {})
+      .finally(() => setAuthChecking(false));
+  }, []);
+
   /* ---------- load personal data + run recurring on login ---------- */
   useEffect(() => {
-    if (!user) return;
+    if (!account) return;
     setLoading(true);
-    loadUser(user).then((existing) => {
-      let data = existing || emptyUserData(user);
+    loadUser(account.accountId).then((existing) => {
+      let data = existing || emptyUserData(account.accountId, account.name);
+      // keep display name in sync if it was changed via the account record
+      if (data.name !== account.name && !existing) data = { ...data, name: account.name };
       const { rules, postings } = runRecurringRules(data.recurringRules, (rule, date) => ({
         id: uid(), type: rule.type, amountMinor: rule.amountMinor, description: rule.description,
         category: rule.category, account: rule.account, currency: rule.currency || data.settings.baseCurrency,
@@ -210,14 +226,14 @@ export default function App() {
       setLoading(false);
       if (postings.length) addToast("info", `${postings.length} recurring transaction${postings.length > 1 ? "s" : ""} posted`);
     });
-  }, [user]); // eslint-disable-line
+  }, [account]); // eslint-disable-line
 
   /* ---------- debounce-save personal data ---------- */
   useEffect(() => {
-    if (!user || !userData || loading) return;
-    const t = setTimeout(() => saveUser(user, userData), 350);
+    if (!account || !userData || loading) return;
+    const t = setTimeout(() => saveUser(account.accountId, userData), 350);
     return () => clearTimeout(t);
-  }, [userData, user, loading]);
+  }, [userData, account, loading]);
 
   /* ---------- load all groups the user belongs to ---------- */
   useEffect(() => {
@@ -245,7 +261,7 @@ export default function App() {
       setGroupsData(map);
     })();
     return () => { cancelled = true; };
-  }, [userData?.groups?.length, user]); // eslint-disable-line
+  }, [userData?.groups?.length, account]); // eslint-disable-line
 
   const updateUser = useCallback((updater) => {
     setUserData((prev) => (typeof updater === "function" ? updater(prev) : updater));
@@ -258,12 +274,16 @@ export default function App() {
     });
   }, []);
 
-  const logout = () => { setUser(null); setUserData(null); setGroupsData({}); setView("overview"); };
+  const logout = () => {
+    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    setAccount(null); setUserData(null); setGroupsData({}); setView("overview");
+  };
 
-  if (!user) return <LoginScreen nameInput={nameInput} setNameInput={setNameInput} onEnter={() => nameInput.trim() && setUser(nameInput.trim())} />;
+  if (authChecking) return <FullScreenLoader />;
+  if (!account) return <AuthScreen onAuthed={setAccount} />;
   if (!userData || loading) return <FullScreenLoader />;
 
-  const ctx = { user, userData, updateUser, groupsData, updateGroup, addToast, setView, activeGroupId, setActiveGroupId, setShowAddTxn };
+  const ctx = { user: userData.name, accountId: account.accountId, userData, updateUser, groupsData, updateGroup, addToast, setView, activeGroupId, setActiveGroupId, setShowAddTxn };
 
   return (
     <div style={styles.app}>
@@ -938,23 +958,82 @@ function DemoBanner() {
   return (
     <div style={styles.demoBanner}>
       <Info size={13} />
-      <span>Demo Mode — data is stored for real (Vercel KV), but sign-in is name-only with no password, so treat this as a shared space rather than a private account. No payments or push notifications are sent.</span>
+      <span>Your account is password-protected and your personal data is private to you. Groups are shared with anyone who has the group — no payments or push notifications are sent by this app.</span>
     </div>
   );
 }
 
-function LoginScreen({ nameInput, setNameInput, onEnter }) {
+function AuthScreen({ onAuthed }) {
   useFonts();
+  const [mode, setMode] = useState("login"); // login | signup
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const switchMode = (m) => { setMode(m); setError(""); };
+
+  const submit = async () => {
+    setError("");
+    const normEmail = email.trim().toLowerCase();
+    if (!normEmail || !normEmail.includes("@")) { setError("Enter a valid email address."); return; }
+    if (!password) { setError("Enter your password."); return; }
+    if (mode === "signup") {
+      if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
+      if (password !== confirmPassword) { setError("Passwords don't match."); return; }
+      if (!name.trim()) { setError("Enter a display name — this is what shows up in your groups."); return; }
+    }
+
+    setBusy(true);
+    try {
+      const res = await fetch(mode === "signup" ? "/api/auth/signup" : "/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mode === "signup" ? { email: normEmail, password, name: name.trim() } : { email: normEmail, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Something went wrong."); setBusy(false); return; }
+      onAuthed(data);
+    } catch {
+      setError("Couldn't reach the server. Try again in a moment.");
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={styles.loginWrap}>
       <div style={styles.loginCard}>
         <Wallet size={28} color="#2F6F62" />
         <h1 style={styles.loginTitle}>MoneyFlow</h1>
         <p style={styles.loginSub}>Personal finance and shared expenses, in one place.</p>
-        <input style={styles.input} placeholder="Enter your name" value={nameInput}
-          onChange={(e) => setNameInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onEnter()} />
-        <button style={{ ...styles.primaryBtn, width: "100%", justifyContent: "center", marginTop: 10 }} onClick={onEnter}>Enter demo</button>
-        <p style={styles.loginNote}>Name-only sign-in — anyone who knows this name can see this data. There's no password yet. Fine among friends who trust each other; add real auth before using this for anything sensitive.</p>
+
+        <div style={styles.scopeToggle}>
+          <button type="button" onClick={() => switchMode("login")} style={{ ...styles.scopeBtn, ...(mode === "login" ? styles.scopeBtnActive : {}) }}>Log in</button>
+          <button type="button" onClick={() => switchMode("signup")} style={{ ...styles.scopeBtn, ...(mode === "signup" ? styles.scopeBtnActive : {}) }}>Sign up</button>
+        </div>
+
+        <form style={{ width: "100%", display: "flex", flexDirection: "column", gap: 8 }} onSubmit={(e) => { e.preventDefault(); submit(); }}>
+          {mode === "signup" && (
+            <input style={styles.input} placeholder="Display name (shown in your groups)" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
+          )}
+          <input style={styles.input} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+          <input style={styles.input} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "signup" ? "new-password" : "current-password"} />
+          {mode === "signup" && (
+            <input style={styles.input} type="password" placeholder="Confirm password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" />
+          )}
+          {error && <div style={styles.authError}>{error}</div>}
+          <button type="submit" style={{ ...styles.primaryBtn, width: "100%", justifyContent: "center", marginTop: 4 }} disabled={busy}>
+            {busy ? <Loader2 size={15} className="spin" /> : mode === "signup" ? "Create account" : "Log in"}
+          </button>
+        </form>
+
+        <p style={styles.loginNote}>
+          {mode === "signup"
+            ? "Your password is hashed before it's ever stored. Personal data is private to your account; group data is shared with anyone who has that group."
+            : "Don't have an account yet? Switch to Sign up above."}
+        </p>
       </div>
     </div>
   );
@@ -2344,27 +2423,28 @@ function ActivitySettings({ ctx }) {
 }
 
 function DemoSettings({ ctx }) {
-  const { user, userData, updateUser, addToast } = ctx;
+  const { accountId, userData, updateUser, addToast } = ctx;
   const resetDemo = () => {
-    updateUser(emptyUserData(user));
-    addToast("info", "Demo data reset");
+    updateUser(emptyUserData(accountId, userData.name));
+    addToast("info", "Data reset");
   };
   const exportEverything = () => downloadText(`moneyflow-full-export-${todayISO()}.json`, JSON.stringify(userData, null, 2), "application/json");
   const deleteEverything = () => {
-    if (!window.confirm("This clears all your MoneyFlow data on this device. Continue?")) return;
+    if (!window.confirm("This clears all your MoneyFlow data. Continue?")) return;
     resetDemo();
   };
   return (
     <div style={styles.card}>
       <h2 style={styles.cardTitle}>Demo Mode &amp; privacy</h2>
       <p style={{ fontSize: 12.5, color: "#8A8A7E", lineHeight: 1.6 }}>
-        Your data is genuinely persisted in Vercel KV now — it survives reloads and syncs across devices. What's still missing is a real
-        account system: anyone who types your name can read and edit your data, since there's no password or session behind it. Fine for a
-        household or friend group who trust each other; add real authentication (see README) before treating this as private.
+        Your account is protected by a password now, and your personal data (accounts, transactions, budgets, goals) is locked to your login —
+        no one else can read or edit it. One thing still worth knowing: group data is shared with anyone who has the group, and any signed-in
+        person can currently open any group by its id, since the app doesn't yet track per-group membership at the account level. Fine for
+        groups of people who already trust each other; see the README if you want to tighten that further.
       </p>
       <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
         <button style={styles.secondaryBtn} onClick={exportEverything}>Export all my data (JSON)</button>
-        <button style={styles.dangerBtn} onClick={deleteEverything}>Reset demo data</button>
+        <button style={styles.dangerBtn} onClick={deleteEverything}>Reset my data</button>
       </div>
     </div>
   );
@@ -2395,6 +2475,7 @@ const styles = {
   loginTitle: { fontFamily: "Space Grotesk, sans-serif", fontWeight: 700, fontSize: 26, margin: "6px 0 0" },
   loginSub: { fontSize: 13, color: "#6B695E", margin: "0 0 10px" },
   loginNote: { fontSize: 10.5, color: "#9A9587", marginTop: 10, lineHeight: 1.4 },
+  authError: { background: "#FBEAE5", color: "#B5533C", border: "1px solid #EFC9BB", borderRadius: 7, padding: "8px 10px", fontSize: 12, textAlign: "left" },
   loaderWrap: { minHeight: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: "#EDEFE9" },
   input: { width: "100%", padding: "10px 12px", borderRadius: 7, border: "1px solid #DCE0D3", fontSize: 14, boxSizing: "border-box", fontFamily: "Inter" },
   primaryBtn: { display: "flex", alignItems: "center", gap: 6, background: "#2F6F62", color: "#fff", border: "none", borderRadius: 7, padding: "10px 16px", fontWeight: 600, fontSize: 13, cursor: "pointer" },

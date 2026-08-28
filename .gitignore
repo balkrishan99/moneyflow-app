@@ -5,3 +5,5 @@ dist
 .env.local
 .DS_Store
 verify_nvidia_api.js
+.vercel
+.env*.local
